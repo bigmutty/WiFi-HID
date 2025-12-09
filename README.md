@@ -1,4 +1,4 @@
-# WiFi-HID DDocumentation
+# WiFi-HID Documentation
 
 This CircuitPython script transforms your Raspberry Pi Pico W or Pico 2W into a WiFi-controlled USB keyboard and mouse. Control your computer remotely by sending HTTP requests to the Pico.
 
@@ -787,3 +787,4 @@ For issues related to:
 ---
 
 **Happy automating! 🚀**
+
