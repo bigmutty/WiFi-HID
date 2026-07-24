@@ -4,16 +4,16 @@
 #
 # Required libraries: Copy these from the Adafruit CircuitPython Library Bundle into your /lib folder.
 # - adafruit_hid/
-# - adafruit_httpserver/
 # - adafruit_hid/keyboard_layout_us.mpy
 
 import time
 import json
+import board
+import digitalio
 import wifi
 import mdns
 import socketpool
 import usb_hid
-from adafruit_httpserver import Server as HTTPServer, Request as HTTPRequest, Response as HTTPResponse, POST
 
 from adafruit_hid.keyboard import Keyboard
 from adafruit_hid.keycode import Keycode
@@ -24,6 +24,32 @@ from adafruit_hid.keyboard_layout_us import KeyboardLayoutUS
 kbd = Keyboard(usb_hid.devices)
 layout = KeyboardLayoutUS(kbd)
 mouse = Mouse(usb_hid.devices)
+
+# Onboard LED: blinks continuously while WiFi is disconnected, and flashes 3 times fast
+# whenever a client connects to the socket server (see blink_led()/blink_led_while_waiting()).
+led = digitalio.DigitalInOut(board.LED)
+led.direction = digitalio.Direction.OUTPUT
+led.value = False
+
+
+def blink_led(times, on_time=0.1, off_time=0.1):
+    """Blink the onboard LED a fixed number of times (used as a one-off event indicator)."""
+    for _ in range(times):
+        led.value = True
+        time.sleep(on_time)
+        led.value = False
+        time.sleep(off_time)
+
+
+def blink_led_while_waiting(seconds, on_time=0.5, off_time=0.5):
+    """Blink the onboard LED for about `seconds` (used while WiFi is disconnected)."""
+    elapsed = 0
+    while elapsed < seconds:
+        led.value = True
+        time.sleep(on_time)
+        led.value = False
+        time.sleep(off_time)
+        elapsed += on_time + off_time
 
 # Dictionary to map string key names to Keycode attributes
 KEY_MAP = {k.upper(): v for k, v in Keycode.__dict__.items() if not k.startswith("__")}
@@ -101,32 +127,38 @@ def handle_request(body):
         print(f"Error handling request: {e}")
 
 # Set up WiFi and the HTTP Server.
+#
+# WiFi credentials and the mDNS hostname are configured via wifi_settings.json in the root of
+# the CIRCUITPY drive, e.g.:
+#   {"hostname": "WiFi-HID", "networks": [{"ssid": "Home", "password": "pw"}]}
+# Use the WiFi-HID Windows Tray Client's "Pico Settings" dialog (while the Pico is plugged in
+# over USB) to create/edit this file, or write it by hand.
+WIFI_SETTINGS_FILE = "wifi_settings.json"
+HOSTNAME = "WiFi-HID"
+networks_to_try = []
+
 try:
-    from secrets import secrets
-except ImportError:
-    print("WiFi secrets are not defined in a secrets.py file.")
-    raise
+    with open(WIFI_SETTINGS_FILE, "r") as f:
+        wifi_settings = json.load(f)
+    if isinstance(wifi_settings.get("hostname"), str) and wifi_settings["hostname"]:
+        HOSTNAME = wifi_settings["hostname"]
+    if isinstance(wifi_settings.get("networks"), list):
+        networks_to_try = wifi_settings["networks"]
+    print(f"Loaded {WIFI_SETTINGS_FILE}")
+except (OSError, ValueError) as e:
+    print(f"Could not load {WIFI_SETTINGS_FILE}: {e}")
+
+if not networks_to_try:
+    raise RuntimeError(
+        f"No WiFi networks configured. Create {WIFI_SETTINGS_FILE} in the root of the "
+        "CIRCUITPY drive (e.g. via the WiFi-HID Tray Client's Pico Settings dialog) with at "
+        "least one entry in its 'networks' list."
+    )
 
 # Connect to WiFi
 print("Connecting to WiFi...")
 while not wifi.radio.connected:
     try:
-        # Prepare list of networks to try
-        networks_to_try = []
-        if 'networks' in secrets:
-            networks_to_try.extend(secrets['networks'])
-        
-        # Add top-level credential if not already covered or if 'networks' is missing
-        if 'ssid' in secrets and 'password' in secrets:
-             # Check if this ssid is already in the list
-             if not any(n.get('ssid') == secrets['ssid'] for n in networks_to_try):
-                networks_to_try.append({'ssid': secrets['ssid'], 'password': secrets['password']})
-
-        if not networks_to_try:
-             print("No WiFi credentials found in secrets.py")
-             time.sleep(10)
-             continue
-
         for net in networks_to_try:
             ssid = net.get('ssid')
             password = net.get('password')
@@ -142,36 +174,60 @@ while not wifi.radio.connected:
         
         if not wifi.radio.connected:
             print("Could not connect to any network. Retrying in 10 seconds...")
-            time.sleep(10)
+            blink_led_while_waiting(10)
 
     except Exception as e:
         print(f"Error during WiFi connection: {e}")
-        time.sleep(10)
+        blink_led_while_waiting(10)
 
-# Set up mDNS to allow access via http://WiFi-HID.local
+led.value = False
+
+# Set up mDNS to allow discovery via WiFi-HID.local
+PORT = 5005
+
 try:
     mdns_server = mdns.Server(wifi.radio)
-    mdns_server.hostname = "WiFi-HID"
-    mdns_server.advertise_service(service_type="_http", protocol="_tcp", port=80)
-    print(f"mDNS hostname set to: WiFi-HID.local")
+    mdns_server.hostname = HOSTNAME
+    mdns_server.advertise_service(service_type="_wifihid", protocol="_tcp", port=PORT)
+    print(f"mDNS hostname set to: {HOSTNAME}.local")
 except Exception as e:
     print(f"Failed to start mDNS: {e}")
 
 pool = socketpool.SocketPool(wifi.radio)
-server = HTTPServer(pool)
+server_socket = pool.socket(pool.AF_INET, pool.SOCK_STREAM)
+server_socket.setsockopt(pool.SOL_SOCKET, pool.SO_REUSEADDR, 1)
+server_socket.bind((str(wifi.radio.ipv4_address), PORT))
+server_socket.listen(1)
 
-@server.route("/command", POST)
-def command_handler(request: HTTPRequest):
+print("Starting socket server...")
+print(f"Listening on: WiFi-HID.local:{PORT} or {wifi.radio.ipv4_address}:{PORT}")
+
+recv_buf = bytearray(1024)
+
+# Accept one client connection at a time. Each line sent by the client
+# (newline-delimited) is treated as a single JSON command.
+while True:
     try:
-        body = request.body.decode()
-        handle_request(body)
-        with HTTPResponse(request, content_type="application/json") as response:
-            response.send('{"status": "ok"}')
+        conn, addr = server_socket.accept()
+        print(f"Client connected: {addr}")
+        blink_led(3, on_time=0.1, off_time=0.1)
+        pending = ""
+        try:
+            while True:
+                nbytes = conn.recv_into(recv_buf)
+                if nbytes == 0:
+                    break
+                pending += recv_buf[:nbytes].decode("utf-8")
+                while "\n" in pending:
+                    line, pending = pending.split("\n", 1)
+                    line = line.strip()
+                    if line:
+                        handle_request(line)
+        except OSError as e:
+            print(f"Connection error: {e}")
+        finally:
+            conn.close()
+            print("Client disconnected")
     except Exception as e:
-        with HTTPResponse(request, content_type="application/json") as response:
-            response.send(f'{"status": "error", "message": "{str(e)}"}')
-
-# Start the server and listen for commands.
-print("Starting server...")
-print(f"Listening on: http://WiFi-HID.local or http://{wifi.radio.ipv4_address}")
-server.serve_forever(str(wifi.radio.ipv4_address), 80)
+        print(f"Server error: {e}")
+        time.sleep(1)
