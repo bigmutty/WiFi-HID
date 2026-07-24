@@ -32,7 +32,7 @@ internal sealed class PicoDeviceForm : Form
         MinimizeBox = false;
         ShowInTaskbar = false;
         Font = SystemFonts.MessageBoxFont ?? Control.DefaultFont;
-        ClientSize = new Size(480, 400);
+        ClientSize = new Size(580, 500);
 
         var pathLabel = new Label
         {
