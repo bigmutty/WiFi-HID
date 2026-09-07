@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 
 namespace WiFiHidTrayClient;
 
-/// <summary>One WiFi network entry: {"ssid":..., "password":...}.</summary>
+/// <summary>One WiFi network entry: {"ssid":..., "password":..., "hidden":...}.</summary>
 public sealed class PicoWifiNetwork
 {
     [JsonPropertyName("ssid")]
@@ -11,6 +11,11 @@ public sealed class PicoWifiNetwork
 
     [JsonPropertyName("password")]
     public string Password { get; set; } = string.Empty;
+
+    /// <summary>True if this network doesn't broadcast its SSID; code.py only tries hidden
+    /// networks once none of the broadcast ones are found by scanning.</summary>
+    [JsonPropertyName("hidden")]
+    public bool Hidden { get; set; }
 }
 
 /// <summary>

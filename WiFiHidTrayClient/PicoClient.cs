@@ -71,6 +71,11 @@ public sealed class PicoClient : IDisposable
     public void SendMouseWheel(int wheel)
         => Enqueue(new { command = "mouse", x = 0, y = 0, wheel });
 
+    /// <summary>Sends the full simulated joystick state (see code.py's Joystick.report); the
+    /// Pico applies it as-is rather than tracking incremental state.</summary>
+    public void SendJoystick(int x, int y, bool button1, bool button2)
+        => Enqueue(new { command = "joystick", x, y, button1, button2 });
+
     /// <summary>
     /// Sends a virtual Ctrl+Alt+Delete to the Pico (Control down, Alt down, Delete press,
     /// Alt up, Control up) - used because the real Ctrl+Alt+Del is intercepted by Winlogon
@@ -112,34 +117,59 @@ public sealed class PicoClient : IDisposable
         }
     }
 
+    // How long the sender thread waits for an outgoing message before treating the wait as an
+    // opportunity to check on / heartbeat the connection instead. This is what lets a dropped
+    // Pico connection be detected promptly even while no keyboard/mouse input is happening.
+    private const int HeartbeatIntervalMs = 3000;
+
     private void SenderLoop()
     {
         var token = _cts.Token;
+        while (!token.IsCancellationRequested)
+        {
+            string? json;
+            bool hasItem;
+            try
+            {
+                hasItem = _outbox.TryTake(out json, HeartbeatIntervalMs, token);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+
+            if (!hasItem)
+            {
+                // Idle - use this wakeup to make sure the connection is actually still alive
+                // rather than waiting for the next real command to discover it's gone.
+                if (TryEnsureConnected())
+                {
+                    SendRaw("{\"command\":\"ping\"}");
+                }
+                continue;
+            }
+
+            if (!TryEnsureConnected())
+            {
+                // Drop the message; SendReleaseAllKeysAndButtons() is called after every
+                // capture toggle so state re-syncs once the connection comes back.
+                continue;
+            }
+
+            SendRaw(json!);
+        }
+    }
+
+    private void SendRaw(string json)
+    {
         try
         {
-            foreach (var json in _outbox.GetConsumingEnumerable(token))
-            {
-                if (!TryEnsureConnected())
-                {
-                    // Drop the message; SendReleaseAllKeysAndButtons() is called after every
-                    // capture toggle so state re-syncs once the connection comes back.
-                    continue;
-                }
-
-                try
-                {
-                    var bytes = Encoding.UTF8.GetBytes(json + "\n");
-                    _stream!.Write(bytes, 0, bytes.Length);
-                }
-                catch
-                {
-                    DisposeSocket();
-                }
-            }
+            var bytes = Encoding.UTF8.GetBytes(json + "\n");
+            _stream!.Write(bytes, 0, bytes.Length);
         }
-        catch (OperationCanceledException)
+        catch
         {
-            // Normal shutdown.
+            DisposeSocket();
         }
     }
 

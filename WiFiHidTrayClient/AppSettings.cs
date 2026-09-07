@@ -34,6 +34,17 @@ public sealed class AppSettings
     public bool SendCtrlAltDelRequiresShift { get; set; } = true;
     public string SendCtrlAltDelKey { get; set; } = "Delete";
 
+    /// <summary>
+    /// Modifier requirements and trigger key for the "toggle Joystick Mode" hotkey. While
+    /// active, mouse movement is translated into simulated joystick axis movement (see
+    /// code.py's Joystick class) instead of cursor-move commands, and the left/right mouse
+    /// buttons become joystick buttons 1/2. Only recognized while capturing is on.
+    /// </summary>
+    public bool JoystickRequiresControl { get; set; } = true;
+    public bool JoystickRequiresAlt { get; set; } = true;
+    public bool JoystickRequiresShift { get; set; } = true;
+    public string JoystickToggleKey { get; set; } = "J";
+
     private static string SettingsPath => Path.Combine(AppContext.BaseDirectory, "settings.json");
 
     public static AppSettings Load()

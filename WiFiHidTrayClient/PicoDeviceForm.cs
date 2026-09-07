@@ -55,7 +55,9 @@ internal sealed class PicoDeviceForm : Form
 
         var networksLabel = new Label
         {
-            Text = "WiFi networks (tried in order until one connects). At least one is required.",
+            Text = "WiFi networks (tried in order until one connects). At least one is required.\n" +
+                   "Check \"Hidden\" for networks that don't broadcast their SSID - those are only\n" +
+                   "tried if none of the broadcast ones above are in range.",
             AutoSize = true,
             Margin = new Padding(3, 12, 3, 4),
         };
@@ -93,6 +95,7 @@ internal sealed class PicoDeviceForm : Form
         };
         _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Ssid", HeaderText = "SSID" });
         _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Password", HeaderText = "Password" });
+        _grid.Columns.Add(new DataGridViewCheckBoxColumn { Name = "Hidden", HeaderText = "Hidden", FillWeight = 40 });
 
         var buttonPanel = new FlowLayoutPanel
         {
@@ -161,7 +164,7 @@ internal sealed class PicoDeviceForm : Form
         _hostnameBox.Text = string.IsNullOrWhiteSpace(settings.Hostname) ? "WiFi-HID" : settings.Hostname;
         foreach (var network in settings.Networks)
         {
-            _grid.Rows.Add(network.Ssid, network.Password);
+            _grid.Rows.Add(network.Ssid, network.Password, network.Hidden);
         }
     }
 
@@ -191,7 +194,7 @@ internal sealed class PicoDeviceForm : Form
             }
         }
 
-        _grid.Rows.Add(ssid, password);
+        _grid.Rows.Add(ssid, password, false);
     }
 
     private bool TrySave()
@@ -213,12 +216,13 @@ internal sealed class PicoDeviceForm : Form
 
             var ssid = Convert.ToString(row.Cells["Ssid"].Value)?.Trim() ?? string.Empty;
             var password = Convert.ToString(row.Cells["Password"].Value) ?? string.Empty;
+            var hidden = row.Cells["Hidden"].Value is bool b && b;
             if (string.IsNullOrEmpty(ssid))
             {
                 continue;
             }
 
-            networks.Add(new PicoWifiNetwork { Ssid = ssid, Password = password });
+            networks.Add(new PicoWifiNetwork { Ssid = ssid, Password = password, Hidden = hidden });
         }
 
         if (networks.Count == 0)

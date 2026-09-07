@@ -22,6 +22,7 @@ public sealed class InputCapture : IDisposable
     private readonly HashSet<int> _heldKeys = new();
     private Keys _toggleKey;
     private Keys _sendCtrlAltDelKey;
+    private Keys _joystickToggleKey;
 
     private IntPtr _keyboardHookId = IntPtr.Zero;
     private IntPtr _mouseHookId = IntPtr.Zero;
@@ -31,9 +32,26 @@ public sealed class InputCapture : IDisposable
     private bool _toggleTriggerActive;
     private bool _sendCtrlAltDelKeyHeld;
     private bool _sendCtrlAltDelTriggerActive;
+    private bool _joystickToggleKeyHeld;
+    private bool _joystickToggleTriggerActive;
+
+    // Joystick Mode: mouse movement is accumulated into a spring-centered stick position
+    // (decayed toward zero on a timer) instead of being forwarded as cursor-move commands.
+    private const double JoystickSensitivity = 2.0;
+    private const double JoystickDecayPerTick = 0.80;
+    private const int JoystickTickIntervalMs = 20;
+    private readonly object _joystickLock = new();
+    private volatile bool _joystickMode;
+    private double _joystickX;
+    private double _joystickY;
+    private bool _joystickButton1;
+    private bool _joystickButton2;
+    private System.Threading.Timer? _joystickTimer;
 
     public event Action<bool>? CapturingChanged;
+    public event Action<bool>? JoystickModeChanged;
     public bool IsCapturing => _capturing;
+    public bool IsJoystickMode => _joystickMode;
 
     public InputCapture(PicoClient client, AppSettings settings)
     {
@@ -66,6 +84,15 @@ public sealed class InputCapture : IDisposable
         {
             _sendCtrlAltDelKey = Keys.Delete;
         }
+
+        if (Enum.TryParse(_settings.JoystickToggleKey, ignoreCase: true, out Keys joyKey) && joyKey != Keys.None)
+        {
+            _joystickToggleKey = joyKey;
+        }
+        else if (_joystickToggleKey == default)
+        {
+            _joystickToggleKey = Keys.J;
+        }
     }
 
     /// <summary>Immediately sends a virtual Ctrl+Alt+Del to the Pico, regardless of hotkey state.</summary>
@@ -87,6 +114,13 @@ public sealed class InputCapture : IDisposable
     }
 
     public void ToggleCapturing() => SetCapturing(!_capturing);
+
+    public void ToggleJoystickMode() => SetJoystickMode(!_joystickMode);
+
+    /// <summary>Immediately releases capturing (e.g. because the Pico connection was lost), so
+    /// the local keyboard/mouse isn't left stuck swallowed while there's no one to forward to.
+    /// A no-op if not currently capturing.</summary>
+    public void StopCapturing() => SetCapturing(false);
 
     private static void RegisterRawMouse(IntPtr hwnd)
     {
@@ -119,9 +153,84 @@ public sealed class InputCapture : IDisposable
         {
             NativeMethods.ClipCursorNull(IntPtr.Zero);
             _client.SendReleaseAllKeysAndButtons();
+            if (_joystickMode)
+            {
+                SetJoystickMode(false);
+            }
         }
 
         CapturingChanged?.Invoke(_capturing);
+    }
+
+    private void SetJoystickMode(bool value)
+    {
+        if (_joystickMode == value)
+        {
+            return;
+        }
+
+        _joystickMode = value;
+
+        if (value)
+        {
+            lock (_joystickLock)
+            {
+                _joystickX = 0;
+                _joystickY = 0;
+                _joystickButton1 = false;
+                _joystickButton2 = false;
+            }
+
+            _joystickTimer = new System.Threading.Timer(_ => JoystickTick(), null, 0, JoystickTickIntervalMs);
+        }
+        else
+        {
+            _joystickTimer?.Dispose();
+            _joystickTimer = null;
+            _client.SendJoystick(0, 0, false, false); // release the stick to its resting position
+        }
+
+        JoystickModeChanged?.Invoke(_joystickMode);
+    }
+
+    /// <summary>Runs on a timer while Joystick Mode is on: decays the stick position toward
+    /// center and sends the current full state to the Pico (see PicoClient.SendJoystick).</summary>
+    private void JoystickTick()
+    {
+        int x, y;
+        bool button1, button2;
+        lock (_joystickLock)
+        {
+            _joystickX *= JoystickDecayPerTick;
+            _joystickY *= JoystickDecayPerTick;
+            if (Math.Abs(_joystickX) < 0.5) _joystickX = 0;
+            if (Math.Abs(_joystickY) < 0.5) _joystickY = 0;
+            x = (int)Math.Round(_joystickX);
+            y = (int)Math.Round(_joystickY);
+            button1 = _joystickButton1;
+            button2 = _joystickButton2;
+        }
+
+        _client.SendJoystick(x, y, button1, button2);
+    }
+
+    private void AddJoystickImpulse(int dx, int dy)
+    {
+        lock (_joystickLock)
+        {
+            _joystickX = Math.Clamp(_joystickX + dx * JoystickSensitivity, -127, 127);
+            _joystickY = Math.Clamp(_joystickY + dy * JoystickSensitivity, -127, 127);
+        }
+    }
+
+    private void SetJoystickButton1(bool pressed)
+    {
+        lock (_joystickLock) { _joystickButton1 = pressed; }
+    }
+
+    private void SetJoystickButton2(bool pressed)
+    {
+        lock (_joystickLock) { _joystickButton2 = pressed; }
     }
 
     private static void ClipCursorToPoint()
@@ -172,6 +281,14 @@ public sealed class InputCapture : IDisposable
         bool ctrl = !_settings.SendCtrlAltDelRequiresControl || (NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) & 0x8000) != 0;
         bool alt = !_settings.SendCtrlAltDelRequiresAlt || (NativeMethods.GetAsyncKeyState(NativeMethods.VK_MENU) & 0x8000) != 0;
         bool shift = !_settings.SendCtrlAltDelRequiresShift || (NativeMethods.GetAsyncKeyState(NativeMethods.VK_SHIFT) & 0x8000) != 0;
+        return ctrl && alt && shift;
+    }
+
+    private bool JoystickModifiersSatisfied()
+    {
+        bool ctrl = !_settings.JoystickRequiresControl || (NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) & 0x8000) != 0;
+        bool alt = !_settings.JoystickRequiresAlt || (NativeMethods.GetAsyncKeyState(NativeMethods.VK_MENU) & 0x8000) != 0;
+        bool shift = !_settings.JoystickRequiresShift || (NativeMethods.GetAsyncKeyState(NativeMethods.VK_SHIFT) & 0x8000) != 0;
         return ctrl && alt && shift;
     }
 
@@ -250,6 +367,37 @@ public sealed class InputCapture : IDisposable
                     }
                 }
 
+                // Ctrl+Alt+Shift+J toggles Joystick Mode (mouse movement/buttons become
+                // simulated joystick input instead of cursor movement/clicks). Only armed while
+                // capturing, same rationale as the Ctrl+Alt+Del hotkey above.
+                if (key == _joystickToggleKey)
+                {
+                    if (isDown)
+                    {
+                        bool wasAlreadyDown = _joystickToggleKeyHeld;
+                        _joystickToggleKeyHeld = true;
+                        if (!wasAlreadyDown && _capturing && JoystickModifiersSatisfied())
+                        {
+                            _joystickToggleTriggerActive = true;
+                            ToggleJoystickMode();
+                        }
+                    }
+                    else
+                    {
+                        _joystickToggleKeyHeld = false;
+                    }
+
+                    if (_joystickToggleTriggerActive)
+                    {
+                        if (isUp)
+                        {
+                            _joystickToggleTriggerActive = false;
+                        }
+
+                        return (IntPtr)1;
+                    }
+                }
+
                 if (_capturing)
                 {
                     bool extended = (data.flags & NativeMethods.LLKHF_EXTENDED) != 0;
@@ -285,33 +433,38 @@ public sealed class InputCapture : IDisposable
             switch (msg)
             {
                 case NativeMethods.WM_LBUTTONDOWN:
-                    _client.SendMouseButton("LEFT", "buttonDown");
+                    if (_joystickMode) SetJoystickButton1(true); else _client.SendMouseButton("LEFT", "buttonDown");
                     break;
                 case NativeMethods.WM_LBUTTONUP:
-                    _client.SendMouseButton("LEFT", "buttonUp");
+                    if (_joystickMode) SetJoystickButton1(false); else _client.SendMouseButton("LEFT", "buttonUp");
                     break;
                 case NativeMethods.WM_RBUTTONDOWN:
-                    _client.SendMouseButton("RIGHT", "buttonDown");
+                    if (_joystickMode) SetJoystickButton2(true); else _client.SendMouseButton("RIGHT", "buttonDown");
                     break;
                 case NativeMethods.WM_RBUTTONUP:
-                    _client.SendMouseButton("RIGHT", "buttonUp");
+                    if (_joystickMode) SetJoystickButton2(false); else _client.SendMouseButton("RIGHT", "buttonUp");
                     break;
                 case NativeMethods.WM_MBUTTONDOWN:
-                    _client.SendMouseButton("MIDDLE", "buttonDown");
+                    if (!_joystickMode) _client.SendMouseButton("MIDDLE", "buttonDown");
                     break;
                 case NativeMethods.WM_MBUTTONUP:
-                    _client.SendMouseButton("MIDDLE", "buttonUp");
+                    if (!_joystickMode) _client.SendMouseButton("MIDDLE", "buttonUp");
                     break;
                 case NativeMethods.WM_MOUSEWHEEL:
                 {
-                    var data = Marshal.PtrToStructure<NativeMethods.MSLLHOOKSTRUCT>(lParam);
-                    short delta = (short)((data.mouseData >> 16) & 0xFFFF);
-                    int wheel = Math.Sign(delta) * Math.Max(1, Math.Abs(delta) / 120);
-                    _client.SendMouseWheel(wheel);
+                    if (!_joystickMode)
+                    {
+                        var data = Marshal.PtrToStructure<NativeMethods.MSLLHOOKSTRUCT>(lParam);
+                        short delta = (short)((data.mouseData >> 16) & 0xFFFF);
+                        int wheel = Math.Sign(delta) * Math.Max(1, Math.Abs(delta) / 120);
+                        _client.SendMouseWheel(wheel);
+                    }
                     break;
                 }
                 // WM_MOUSEMOVE is swallowed too (movement is forwarded from raw input instead),
-                // as are horizontal wheel/X-button events, which have no Pico equivalent.
+                // as are horizontal wheel/X-button events, which have no Pico equivalent. The
+                // wheel and middle button also have no joystick equivalent, so they're dropped
+                // entirely (rather than forwarded as mouse actions) while Joystick Mode is on.
             }
 
             return (IntPtr)1;
@@ -346,7 +499,14 @@ public sealed class InputCapture : IDisposable
             var raw = Marshal.PtrToStructure<NativeMethods.RAWINPUT>(buffer);
             if (raw.header.dwType == NativeMethods.RIM_TYPEMOUSE && (raw.mouse.lLastX != 0 || raw.mouse.lLastY != 0))
             {
-                SendClampedMove(raw.mouse.lLastX, raw.mouse.lLastY);
+                if (_joystickMode)
+                {
+                    AddJoystickImpulse(raw.mouse.lLastX, raw.mouse.lLastY);
+                }
+                else
+                {
+                    SendClampedMove(raw.mouse.lLastX, raw.mouse.lLastY);
+                }
             }
         }
         finally

@@ -21,6 +21,10 @@ internal sealed class SettingsForm : Form
     private readonly CheckBox _cadAltBox;
     private readonly CheckBox _cadShiftBox;
     private readonly TextBox _cadKeyBox;
+    private readonly CheckBox _joyCtrlBox;
+    private readonly CheckBox _joyAltBox;
+    private readonly CheckBox _joyShiftBox;
+    private readonly TextBox _joyKeyBox;
 
     public string Host => _hostBox.Text.Trim();
     public int Port => (int)_portBox.Value;
@@ -32,6 +36,10 @@ internal sealed class SettingsForm : Form
     public bool SendCtrlAltDelRequiresAlt => _cadAltBox.Checked;
     public bool SendCtrlAltDelRequiresShift => _cadShiftBox.Checked;
     public string SendCtrlAltDelKey => _cadKeyBox.Text.Trim();
+    public bool JoystickRequiresControl => _joyCtrlBox.Checked;
+    public bool JoystickRequiresAlt => _joyAltBox.Checked;
+    public bool JoystickRequiresShift => _joyShiftBox.Checked;
+    public string JoystickToggleKey => _joyKeyBox.Text.Trim();
 
     public SettingsForm(AppSettings settings)
     {
@@ -43,7 +51,7 @@ internal sealed class SettingsForm : Form
         ShowInTaskbar = false;
         AutoScaleMode = AutoScaleMode.Font;
         Font = SystemFonts.MessageBoxFont;
-        ClientSize = new Size(400, 350);
+        ClientSize = new Size(400, 430);
         AutoSize = false;
 
         var layout = new TableLayoutPanel
@@ -69,6 +77,11 @@ internal sealed class SettingsForm : Form
         _cadAltBox = new CheckBox { Text = "Alt", Checked = settings.SendCtrlAltDelRequiresAlt, AutoSize = true };
         _cadShiftBox = new CheckBox { Text = "Shift", Checked = settings.SendCtrlAltDelRequiresShift, AutoSize = true };
 
+        _joyKeyBox = new TextBox { Text = settings.JoystickToggleKey, Dock = DockStyle.Fill };
+        _joyCtrlBox = new CheckBox { Text = "Ctrl", Checked = settings.JoystickRequiresControl, AutoSize = true };
+        _joyAltBox = new CheckBox { Text = "Alt", Checked = settings.JoystickRequiresAlt, AutoSize = true };
+        _joyShiftBox = new CheckBox { Text = "Shift", Checked = settings.JoystickRequiresShift, AutoSize = true };
+
         int row = 0;
         AddRow(layout, ref row, "Pico host / IP:", _hostBox);
         AddRow(layout, ref row, "Pico port:", _portBox);
@@ -78,6 +91,9 @@ internal sealed class SettingsForm : Form
         AddSectionLabel(layout, ref row, "Send Ctrl+Alt+Del hotkey (while capturing)");
         AddRow(layout, ref row, "Modifiers:", FlowOf(_cadCtrlBox, _cadAltBox, _cadShiftBox));
         AddRow(layout, ref row, "Key:", _cadKeyBox);
+        AddSectionLabel(layout, ref row, "Toggle Joystick Mode hotkey (while capturing)");
+        AddRow(layout, ref row, "Modifiers:", FlowOf(_joyCtrlBox, _joyAltBox, _joyShiftBox));
+        AddRow(layout, ref row, "Key:", _joyKeyBox);
 
         var buttonPanel = new FlowLayoutPanel
         {
@@ -125,6 +141,13 @@ internal sealed class SettingsForm : Form
         if (!TryParseKey(_cadKeyBox.Text, out _))
         {
             MessageBox.Show(this, $"'{_cadKeyBox.Text}' is not a recognized key name (e.g. F12, Delete, Escape).",
+                "Invalid settings", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
+
+        if (!TryParseKey(_joyKeyBox.Text, out _))
+        {
+            MessageBox.Show(this, $"'{_joyKeyBox.Text}' is not a recognized key name (e.g. F12, Delete, Escape).",
                 "Invalid settings", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return false;
         }

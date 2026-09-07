@@ -14,6 +14,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripMenuItem _statusItem;
     private readonly ToolStripMenuItem _toggleItem;
     private readonly ToolStripMenuItem _sendCtrlAltDelItem;
+    private readonly ToolStripMenuItem _joystickItem;
     private readonly ToolStripMenuItem _picoSettingsItem;
     private readonly System.Windows.Forms.Timer _picoDetectTimer;
     private string? _picoDriveRoot;
@@ -32,6 +33,9 @@ public sealed class TrayApplicationContext : ApplicationContext
         sendCtrlAltDelItem.Click += (_, _) => _capture.SendCtrlAltDelToRemote();
         _sendCtrlAltDelItem = sendCtrlAltDelItem;
 
+        _joystickItem = new ToolStripMenuItem($"Start Joystick Mode ({DescribeJoystickHotkey()})");
+        _joystickItem.Click += (_, _) => _capture.ToggleJoystickMode();
+
         var settingsItem = new ToolStripMenuItem("Open Settings...");
         settingsItem.Click += (_, _) => OpenSettings();
 
@@ -46,6 +50,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_toggleItem);
         menu.Items.Add(sendCtrlAltDelItem);
+        menu.Items.Add(_joystickItem);
         menu.Items.Add(settingsItem);
         menu.Items.Add(_picoSettingsItem);
         menu.Items.Add(new ToolStripSeparator());
@@ -62,6 +67,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         _client.ConnectionChanged += OnConnectionChanged;
         _capture.CapturingChanged += OnCapturingChanged;
+        _capture.JoystickModeChanged += OnJoystickModeChanged;
 
         _capture.Start();
 
@@ -94,8 +100,24 @@ public sealed class TrayApplicationContext : ApplicationContext
         return string.Join("+", parts) + ", while capturing";
     }
 
+    private string DescribeJoystickHotkey()
+    {
+        var parts = new List<string>();
+        if (_settings.JoystickRequiresControl) parts.Add("Ctrl");
+        if (_settings.JoystickRequiresAlt) parts.Add("Alt");
+        if (_settings.JoystickRequiresShift) parts.Add("Shift");
+        parts.Add(_settings.JoystickToggleKey);
+        return string.Join("+", parts) + ", while capturing";
+    }
+
     private void OnConnectionChanged(bool connected)
     {
+        if (!connected)
+        {
+            // Don't leave the local keyboard/mouse swallowed with no one to forward input to.
+            _capture.StopCapturing();
+        }
+
         RunOnUiThread(() =>
         {
             _statusItem.Text = connected
@@ -126,8 +148,26 @@ public sealed class TrayApplicationContext : ApplicationContext
     {
         var connState = _client.IsConnected ? "connected" : "disconnected";
         var capState = _capture.IsCapturing ? "CAPTURING" : "idle";
-        var text = $"WiFi-HID ({connState}, {capState})";
+        var text = _capture.IsJoystickMode
+            ? $"WiFi-HID ({connState}, {capState}, JOYSTICK)"
+            : $"WiFi-HID ({connState}, {capState})";
         _trayIcon.Text = text.Length > 63 ? text[..63] : text;
+    }
+
+    private void OnJoystickModeChanged(bool joystickMode)
+    {
+        RunOnUiThread(() =>
+        {
+            _joystickItem.Text = joystickMode
+                ? $"Stop Joystick Mode ({DescribeJoystickHotkey()})"
+                : $"Start Joystick Mode ({DescribeJoystickHotkey()})";
+            RefreshTrayText();
+            _trayIcon.ShowBalloonTip(1500, "WiFi-HID Client",
+                joystickMode
+                    ? $"Joystick Mode on - mouse movement now simulates a joystick. Press {DescribeJoystickHotkey()} to release."
+                    : "Joystick Mode off - mouse movement restored to normal.",
+                ToolTipIcon.Info);
+        });
     }
 
     private void OpenSettings()
@@ -148,6 +188,10 @@ public sealed class TrayApplicationContext : ApplicationContext
         _settings.SendCtrlAltDelRequiresAlt = form.SendCtrlAltDelRequiresAlt;
         _settings.SendCtrlAltDelRequiresShift = form.SendCtrlAltDelRequiresShift;
         _settings.SendCtrlAltDelKey = form.SendCtrlAltDelKey;
+        _settings.JoystickRequiresControl = form.JoystickRequiresControl;
+        _settings.JoystickRequiresAlt = form.JoystickRequiresAlt;
+        _settings.JoystickRequiresShift = form.JoystickRequiresShift;
+        _settings.JoystickToggleKey = form.JoystickToggleKey;
         _settings.Save();
 
         _client.UpdateEndpoint(_settings.Host, _settings.Port);
@@ -157,6 +201,9 @@ public sealed class TrayApplicationContext : ApplicationContext
             ? $"Stop Capturing ({DescribeHotkey()})"
             : $"Start Capturing ({DescribeHotkey()})";
         _sendCtrlAltDelItem.Text = $"Send Ctrl+Alt+Del ({DescribeCtrlAltDelHotkey()})";
+        _joystickItem.Text = _capture.IsJoystickMode
+            ? $"Stop Joystick Mode ({DescribeJoystickHotkey()})"
+            : $"Start Joystick Mode ({DescribeJoystickHotkey()})";
         RefreshTrayText();
     }
 

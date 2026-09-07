@@ -8,10 +8,12 @@
 
 import time
 import json
+import errno
 import board
 import digitalio
 import wifi
 import mdns
+import microcontroller
 import socketpool
 import usb_hid
 
@@ -20,10 +22,37 @@ from adafruit_hid.keycode import Keycode
 from adafruit_hid.mouse import Mouse
 from adafruit_hid.keyboard_layout_us import KeyboardLayoutUS
 
-# Set up the Pico as a USB HID keyboard and mouse.
+
+class Joystick:
+    """Wraps the custom 2-axis/2-button joystick HID device defined in boot.py."""
+
+    def __init__(self, devices):
+        self._device = None
+        for device in devices:
+            if device.usage_page == 0x01 and device.usage == 0x04:
+                self._device = device
+                break
+
+    @property
+    def available(self):
+        return self._device is not None
+
+    def report(self, x, y, button1, button2):
+        if self._device is None:
+            return
+        x = max(-127, min(127, int(x)))
+        y = max(-127, min(127, int(y)))
+        buttons = (1 if button1 else 0) | (2 if button2 else 0)
+        self._device.send_report(bytes([buttons, x & 0xFF, y & 0xFF]))
+
+
+# Set up the Pico as a USB HID keyboard, mouse, and joystick.
 kbd = Keyboard(usb_hid.devices)
 layout = KeyboardLayoutUS(kbd)
 mouse = Mouse(usb_hid.devices)
+joystick = Joystick(usb_hid.devices)
+if not joystick.available:
+    print("Joystick HID device not found - add/update boot.py and power-cycle the Pico.")
 
 # Onboard LED: blinks continuously while WiFi is disconnected, and flashes 3 times fast
 # whenever a client connects to the socket server (see blink_led()/blink_led_while_waiting()).
@@ -51,6 +80,19 @@ def blink_led_while_waiting(seconds, on_time=0.5, off_time=0.5):
         time.sleep(off_time)
         elapsed += on_time + off_time
 
+
+def check_wifi_or_reboot():
+    """If the WiFi link has dropped, reboot the board so the startup connect/retry logic runs again."""
+    if not wifi.radio.connected:
+        print("WiFi connection lost. Rebooting...")
+        blink_led(10, on_time=0.1, off_time=0.1)
+        microcontroller.reset()
+
+
+def is_timeout_error(exc):
+    """True if `exc` (an OSError) was raised because a socket operation's timeout elapsed."""
+    return getattr(exc, "errno", None) in (errno.ETIMEDOUT, errno.EAGAIN)
+
 # Dictionary to map string key names to Keycode attributes
 KEY_MAP = {k.upper(): v for k, v in Keycode.__dict__.items() if not k.startswith("__")}
 
@@ -64,8 +106,9 @@ MOUSE_BUTTON_MAP = {
 def handle_request(body):
     try:
         data = json.loads(body)
-        print(f"Command received: {data}")
         command = data.get("command")
+        if command != "ping":  # heartbeats are frequent and not worth logging
+            print(f"Command received: {data}")
 
         if command == "type":
             text = data.get("text", "")
@@ -120,6 +163,20 @@ def handle_request(body):
                         print(f"Unknown action: {action}")
                 elif button_name: # button name provided but not valid
                     print(f"Unknown mouse button: {button_name}")
+
+        elif command == "joystick":
+            joystick.report(
+                data.get("x", 0),
+                data.get("y", 0),
+                data.get("button1", False),
+                data.get("button2", False),
+            )
+
+        elif command == "ping":
+            # Heartbeat from the Tray Client used to detect a dropped connection while idle;
+            # no action needed, and intentionally not logged to avoid spamming the console.
+            pass
+
         else:
             print(f"Unknown command: {command}")
 
@@ -131,6 +188,8 @@ def handle_request(body):
 # WiFi credentials and the mDNS hostname are configured via wifi_settings.json in the root of
 # the CIRCUITPY drive, e.g.:
 #   {"hostname": "WiFi-HID", "networks": [{"ssid": "Home", "password": "pw"}]}
+# Networks are tried in the listed order until one connects. A "hidden": true flag can be set
+# per network but currently has no functional effect (see try_connect() below).
 # Use the WiFi-HID Windows Tray Client's "Pico Settings" dialog (while the Pico is plugged in
 # over USB) to create/edit this file, or write it by hand.
 WIFI_SETTINGS_FILE = "wifi_settings.json"
@@ -155,24 +214,33 @@ if not networks_to_try:
         "least one entry in its 'networks' list."
     )
 
+
+def try_connect(networks):
+    """Attempt each network in order (each with a 20s timeout); return True on the first success."""
+    for net in networks:
+        ssid = net.get('ssid')
+        password = net.get('password')
+        if not ssid:
+            continue
+
+        print(f"Connecting to {ssid}...")
+        try:
+            wifi.radio.connect(ssid, password, timeout=20)
+            print("Connected!")
+            return True
+        except Exception as e:
+            print(f"Failed to connect to {ssid}: {e}")
+    return False
+
+
 # Connect to WiFi
 print("Connecting to WiFi...")
 while not wifi.radio.connected:
     try:
-        for net in networks_to_try:
-            ssid = net.get('ssid')
-            password = net.get('password')
-            if not ssid: continue
-
-            print(f"Connecting to {ssid}...")
-            try:
-                wifi.radio.connect(ssid, password)
-                print("Connected!")
-                break
-            except Exception as e:
-                print(f"Failed to connect to {ssid}: {e}")
-        
-        if not wifi.radio.connected:
+        # Scanning for in-range networks first (wifi.radio.start_scanning_networks()) hangs
+        # indefinitely on this board/firmware, so every configured network is tried in order
+        # instead; the "hidden" flag has no functional effect without a scan.
+        if not try_connect(networks_to_try):
             print("Could not connect to any network. Retrying in 10 seconds...")
             blink_led_while_waiting(10)
 
@@ -198,6 +266,9 @@ server_socket = pool.socket(pool.AF_INET, pool.SOCK_STREAM)
 server_socket.setsockopt(pool.SOL_SOCKET, pool.SO_REUSEADDR, 1)
 server_socket.bind((str(wifi.radio.ipv4_address), PORT))
 server_socket.listen(1)
+# Timeout so the accept()/recv_into() calls below periodically return control to us even with
+# no client traffic, letting us notice a dropped WiFi link and reboot instead of blocking forever.
+server_socket.settimeout(5.0)
 
 print("Starting socket server...")
 print(f"Listening on: WiFi-HID.local:{PORT} or {wifi.radio.ipv4_address}:{PORT}")
@@ -208,13 +279,26 @@ recv_buf = bytearray(1024)
 # (newline-delimited) is treated as a single JSON command.
 while True:
     try:
-        conn, addr = server_socket.accept()
+        try:
+            conn, addr = server_socket.accept()
+        except OSError as e:
+            if is_timeout_error(e):
+                check_wifi_or_reboot()
+                continue
+            raise
         print(f"Client connected: {addr}")
         blink_led(3, on_time=0.1, off_time=0.1)
+        conn.settimeout(5.0)
         pending = ""
         try:
             while True:
-                nbytes = conn.recv_into(recv_buf)
+                try:
+                    nbytes = conn.recv_into(recv_buf)
+                except OSError as e:
+                    if is_timeout_error(e):
+                        check_wifi_or_reboot()
+                        continue
+                    raise
                 if nbytes == 0:
                     break
                 pending += recv_buf[:nbytes].decode("utf-8")
@@ -225,9 +309,11 @@ while True:
                         handle_request(line)
         except OSError as e:
             print(f"Connection error: {e}")
+            check_wifi_or_reboot()
         finally:
             conn.close()
             print("Client disconnected")
     except Exception as e:
         print(f"Server error: {e}")
+        check_wifi_or_reboot()
         time.sleep(1)
