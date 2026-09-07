@@ -1,6 +1,6 @@
 # WiFi-HID Documentation
 
-This CircuitPython script transforms your Raspberry Pi Pico W or Pico 2W into a WiFi-controlled USB keyboard and mouse. Control your computer remotely using the WiFiHidTrayClient Windows app, which forwards your keyboard/mouse input to the Pico over a raw TCP socket.
+This CircuitPython script transforms your Raspberry Pi Pico W or Pico 2W into a WiFi-controlled USB keyboard, mouse, and joystick. Control your computer remotely using the WiFiHidTrayClient Windows app, which forwards your keyboard/mouse input to the Pico over a raw TCP socket.
 
 ## Table of Contents
 
@@ -9,13 +9,19 @@ This CircuitPython script transforms your Raspberry Pi Pico W or Pico 2W into a 
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Usage](#usage)
+  - [Building and running](#building-and-running)
+  - [Toggling capture](#toggling-capture)
+  - [Sending Ctrl+Alt+Del to the remote machine](#sending-ctrlaltdel-to-the-remote-machine)
+  - [Joystick Mode](#joystick-mode)
 - [Troubleshooting](#troubleshooting)
+- [Advanced Usage (Expert)](#advanced-usage-expert)
 
 ## Features
 
 - 🖱️ Control keyboard and mouse over WiFi
 - ⌨️ Type text, press keys, and execute key combinations
 - 🖱️ Move mouse, click buttons, and scroll
+- 🕹️ Toggle a hotkey to turn mouse movement into simulated joystick/gamepad input
 - 🌐 Access via mDNS hostname (`WiFi-HID.local`) or IP address
 - 🔄 Automatic WiFi reconnection
 - 📡 Support for multiple WiFi networks
@@ -65,38 +71,48 @@ CIRCUITPY/
 
 ### Step 3: Upload the Script
 
-1. Copy `code.py` to the root of your `CIRCUITPY` drive
+1. Copy `code.py` and `boot.py` to the root of your `CIRCUITPY` drive
 2. Create and configure `wifi_settings.json` (see [Configuration](#configuration) below)
-3. The Pico will automatically restart and run the script
+3. The Pico will automatically restart and run `code.py`
+
+`boot.py` registers the joystick USB HID device alongside the keyboard/mouse/consumer control
+devices. It only runs on an actual power-up/hard reset - **not** on the auto-reload that happens
+every time `code.py` is saved - so after copying `boot.py` for the first time (or editing it),
+unplug and reconnect the Pico's USB cable once before the joystick will be usable.
 
 ## Configuration
 
-### Creating wifi_settings.json
+Both configuration files below - `wifi_settings.json` (on the Pico) and `settings.json` (next to
+the Tray Client executable) - can be created and edited entirely through the Tray Client's GUI,
+with no manual JSON editing required. This is the recommended way to configure everything; see
+[Managing the Pico over USB ("Pico Settings...")](#managing-the-pico-over-usb-pico-settings) and
+[Client Settings ("Open Settings...")](#client-settings-open-settings) below. If you prefer to
+edit the JSON files by hand instead, see the [Advanced Usage (Expert)](#advanced-usage-expert)
+section.
 
-Create a `wifi_settings.json` file in the root of your `CIRCUITPY` drive with your WiFi
-credentials and (optionally) a custom mDNS hostname. The script tries each network in the
-`networks` list in order until one connects.
+### Managing the Pico over USB ("Pico Settings...")
 
-```json
-{
-  "hostname": "WiFi-HID",
-  "networks": [
-    {"ssid": "HomeNetwork", "password": "homepassword123"},
-    {"ssid": "WorkNetwork", "password": "workpass456"},
-    {"ssid": "MobileHotspot", "password": "mobile789"}
-  ]
-}
-```
+When the Pico is connected to the tray client's PC over USB (mounted as its `CIRCUITPY` drive),
+a **Pico Settings...** item appears in the tray menu (checked every couple of seconds, so it
+shows up/disappears automatically as you plug/unplug the board). It opens a dialog to edit:
 
-**Important Notes:**
-- Replace the `ssid`/`password` values with your actual WiFi credentials
-- The file must be named exactly `wifi_settings.json` and contain valid JSON
-- At least one entry in `networks` is required - `code.py` will refuse to start without one
-- This file contains sensitive information - keep it secure!
+- **Hostname** - the mDNS name the Pico advertises (`<hostname>.local`).
+- **WiFi networks** - a list of SSID/password profiles, tried in order at boot. Click **Add
+  Current Network** to automatically add (or update the saved password for) the WiFi network
+  this PC is currently connected to, instead of typing the SSID/password in by hand.
 
-Instead of editing the file by hand, the Windows Tray Client can create/edit
-`wifi_settings.json` for you via a dialog - see
-[Managing the Pico over USB](#managing-the-pico-over-usb-pico-settings) below.
+Saving writes `wifi_settings.json` to the root of the `CIRCUITPY` drive, which is the only
+source of WiFi credentials and hostname that `code.py` reads - at least one network is required.
+Because CircuitPython auto-reloads on any file change to the drive, the Pico restarts `code.py`
+and reconnects using the new settings right away.
+
+### Client Settings ("Open Settings...")
+
+The tray menu's **Open Settings...** dialog edits the Tray Client's own `settings.json`
+(created next to the executable on first run) - the host/port to connect to, and all of the
+hotkeys (capture toggle, Ctrl+Alt+Del, Joystick Mode). It validates the host and key names and
+applies changes immediately: it reconnects to the new host/port and refreshes all hotkeys on the
+fly, no restart required.
 
 ### Finding Your Device's IP Address
 
@@ -140,42 +156,13 @@ dotnet run -c Release
 The compiled `WiFiHidTrayClient.exe` (in `bin/Release/net8.0-windows/`) can be copied anywhere
 and run standalone - it's a normal tray app with no installer.
 
-### Configuration
-
-On first run a `settings.json` is created next to the executable:
-
-```json
-{
-  "Host": "WiFi-HID.local",
-  "Port": 5005,
-  "ToggleRequiresControl": true,
-  "ToggleRequiresAlt": true,
-  "ToggleRequiresShift": true,
-  "ToggleKey": "F12",
-  "SendCtrlAltDelRequiresControl": true,
-  "SendCtrlAltDelRequiresAlt": true,
-  "SendCtrlAltDelRequiresShift": true,
-  "SendCtrlAltDelKey": "Delete"
-}
-```
-
-`Host` can be either the Pico's IP address or its mDNS hostname (e.g. `WiFi-HID.local`). If it's
-a hostname, the client pings it once to discover its current IP and caches that IP for all
-subsequent (re)connects, so you don't pay the mDNS resolution cost on every reconnect. If a
-connection using the cached IP ever fails (e.g. the Pico got a new DHCP lease), the client
-automatically re-pings the hostname to pick up the new address on the next attempt.
-
-All of these values can also be edited without touching JSON via the tray menu's
-**Open Settings...** dialog, which validates the host and key names and applies changes
-immediately - it reconnects to the new host/port and refreshes both hotkeys on the fly, no
-restart required.
-
 ### Toggling capture
 
-Press **Ctrl+Alt+Shift+F12** (configurable above) to switch capturing on/off - this combo is
-recognized directly inside the hook and is never forwarded anywhere, so it always works even
-while every other key/click is being captured. The tray icon and a balloon tip indicate the
-current state; double-clicking the tray icon also toggles it.
+Press **Ctrl+Alt+Shift+F12** (configurable via [Open Settings...](#client-settings-open-settings))
+to switch capturing on/off - this combo is recognized directly inside the hook and is never
+forwarded anywhere, so it always works even while every other key/click is being captured. The
+tray icon and a balloon tip indicate the current state; double-clicking the tray icon also
+toggles it.
 
 ### Sending Ctrl+Alt+Del to the remote machine
 
@@ -184,27 +171,34 @@ never delivers it to any hook, so it can't be captured and forwarded like other 
 press **Ctrl+Alt+Shift+Delete** while capturing is active to send a virtual Ctrl+Alt+Del to the
 Pico (Control down, Alt down, Delete press, Alt up, Control up). It's also available any time
 from the tray menu as "Send Ctrl+Alt+Del", regardless of capture state. Both hotkeys are
-configurable in `settings.json` (`SendCtrlAltDelKey`, `SendCtrlAltDelRequires*`).
+configurable via [Open Settings...](#client-settings-open-settings).
 
 **Safety net:** if the app ever misbehaves, `Ctrl+Alt+Delete` is handled by Windows itself
 (via Winlogon) and cannot be intercepted by any user-mode hook, so it always remains available
 to open Task Manager and end the tray client's process.
 
-### Managing the Pico over USB ("Pico Settings...")
+### Joystick Mode
 
-When the Pico is connected to the tray client's PC over USB (mounted as its `CIRCUITPY` drive),
-a **Pico Settings...** item appears in the tray menu (checked every couple of seconds, so it
-shows up/disappears automatically as you plug/unplug the board). It opens a dialog to edit:
+Press **Ctrl+Alt+Shift+J** (configurable via [Open Settings...](#client-settings-open-settings))
+while capturing is active to toggle Joystick Mode, or use "Start/Stop Joystick Mode" from the
+tray menu. While Joystick Mode is on:
 
-- **Hostname** - the mDNS name the Pico advertises (`<hostname>.local`).
-- **WiFi networks** - a list of SSID/password profiles, tried in order at boot. Click **Add
-  Current Network** to automatically add (or update the saved password for) the WiFi network
-  this PC is currently connected to, instead of typing the SSID/password in by hand.
+- Mouse movement is translated into joystick X/Y axis input instead of moving the cursor. The
+  stick automatically springs back to center when you stop moving the mouse.
+- Left and right mouse buttons become joystick buttons 1 and 2.
+- The middle button and scroll wheel are ignored (there's no joystick equivalent).
+- Keyboard input is unaffected and keeps forwarding normally.
 
-Saving writes `wifi_settings.json` to the root of the `CIRCUITPY` drive, which is the only
-source of WiFi credentials and hostname that `code.py` reads - at least one network is required.
-Because CircuitPython auto-reloads on any file change to the drive, the Pico restarts `code.py`
-and reconnects using the new settings right away.
+Turning Joystick Mode off (via the hotkey, the tray menu, or automatically when capturing itself
+is stopped) releases the stick back to a centered, no-buttons-pressed state.
+
+The tray icon tooltip shows a `JOYSTICK` suffix while active, and a balloon tip announces each
+toggle.
+
+**Requires `boot.py`:** the joystick only exists as a USB device if `boot.py` has been copied to
+the `CIRCUITPY` drive and the Pico has been power-cycled at least once afterward (see
+[Step 3: Upload the Script](#step-3-upload-the-script)). If the Pico's serial console prints
+`Joystick HID device not found`, `boot.py` hasn't taken effect yet - power-cycle the board.
 
 ## Troubleshooting
 
@@ -250,7 +244,80 @@ and reconnects using the new settings right away.
 3. Move the Pico closer to your WiFi router
 4. Check network congestion
 
-## Advanced Usage
+### Joystick Not Working
+
+1. Confirm `boot.py` has been copied to the root of the `CIRCUITPY` drive
+2. Power-cycle the Pico (unplug/replug USB) - `boot.py` only runs on an actual boot, not on the
+   `code.py` auto-reload
+3. Check the serial console for `Joystick HID device not found` - if you see it, the power cycle
+   above hasn't happened yet
+4. Verify Joystick Mode is actually toggled on (tray tooltip shows `JOYSTICK`) and that capturing
+   is active - the hotkey only works while capturing
+
+## Advanced Usage (Expert)
+
+The sections below cover editing the two JSON configuration files by hand instead of through the
+Tray Client's GUI ([Managing the Pico over USB](#managing-the-pico-over-usb-pico-settings) and
+[Client Settings](#client-settings-open-settings)). This isn't necessary for normal use, but can
+be useful for scripting, backups, or troubleshooting.
+
+### Manually Editing wifi_settings.json
+
+Create or edit a `wifi_settings.json` file in the root of your `CIRCUITPY` drive with your WiFi
+credentials and (optionally) a custom mDNS hostname. The script tries each network in the
+`networks` list in order until one connects.
+
+```json
+{
+  "hostname": "WiFi-HID",
+  "networks": [
+    {"ssid": "HomeNetwork", "password": "homepassword123"},
+    {"ssid": "WorkNetwork", "password": "workpass456"},
+    {"ssid": "MobileHotspot", "password": "mobile789"}
+  ]
+}
+```
+
+**Important Notes:**
+- Replace the `ssid`/`password` values with your actual WiFi credentials
+- The file must be named exactly `wifi_settings.json` and contain valid JSON
+- At least one entry in `networks` is required - `code.py` will refuse to start without one
+- This file contains sensitive information - keep it secure!
+- Because CircuitPython auto-reloads on any file change to the drive, saving this file restarts
+  `code.py` and reconnects using the new settings right away
+
+### Manually Editing settings.json
+
+The Tray Client's `settings.json` (created next to the executable on first run) can be edited
+directly instead of through the **Open Settings...** dialog:
+
+```json
+{
+  "Host": "WiFi-HID.local",
+  "Port": 5005,
+  "ToggleRequiresControl": true,
+  "ToggleRequiresAlt": true,
+  "ToggleRequiresShift": true,
+  "ToggleKey": "F12",
+  "SendCtrlAltDelRequiresControl": true,
+  "SendCtrlAltDelRequiresAlt": true,
+  "SendCtrlAltDelRequiresShift": true,
+  "SendCtrlAltDelKey": "Delete",
+  "JoystickRequiresControl": true,
+  "JoystickRequiresAlt": true,
+  "JoystickRequiresShift": true,
+  "JoystickToggleKey": "J"
+}
+```
+
+`Host` can be either the Pico's IP address or its mDNS hostname (e.g. `WiFi-HID.local`). If it's
+a hostname, the client pings it once to discover its current IP and caches that IP for all
+subsequent (re)connects, so you don't pay the mDNS resolution cost on every reconnect. If a
+connection using the cached IP ever fails (e.g. the Pico got a new DHCP lease), the client
+automatically re-pings the hostname to pick up the new address on the next attempt.
+
+Edits made by hand while the Tray Client is running aren't picked up automatically - use
+**Open Settings...** (even just clicking OK without changes) or restart the app to apply them.
 
 ### Setting Static IP
 
